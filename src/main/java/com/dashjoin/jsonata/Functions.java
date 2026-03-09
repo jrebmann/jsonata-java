@@ -32,9 +32,11 @@ import java.text.DecimalFormatSymbols;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -163,6 +165,10 @@ public class Functions {
         if (arg == null)
           return null;
 
+        // see https://docs.jsonata.org/string-functions#string: Strings are unchanged
+        if (arg instanceof String)
+          return (String) arg;
+        
         StringBuilder sb = new StringBuilder();
         string(sb, arg, prettify!=null && prettify, "");
         return sb.toString();
@@ -189,6 +195,11 @@ public class Functions {
         }
 
         if (arg instanceof Double) {
+          double d = ((Double)arg).doubleValue();
+          if (d % 1 == 0 && Long.MIN_VALUE < d && d <= Long.MAX_VALUE) {
+              b.append(Math.round(d)); return;
+          }
+            
           // TODO: this really should be in the jackson serializer
           BigDecimal bd = new BigDecimal((Double)arg, new MathContext(15));
           String res = bd.stripTrailingZeros().toString();
@@ -206,7 +217,8 @@ public class Functions {
         }
         
         if (arg instanceof String) {
-            b.append(arg); return;
+            // quotes within strings must be escaped
+            Utils.quote((String)arg, b); return;
         }
 
         if (arg instanceof Map) {
@@ -219,7 +231,7 @@ public class Functions {
                     b.append("  ");
                 }
                 b.append('"');
-                b.append(e.getKey());
+                Utils.quote(e.getKey(), b);
                 b.append('"');
                 b.append(':');
                 if (prettify)
@@ -276,6 +288,62 @@ public class Functions {
 
         // Throw error for unknown types
         throw new IllegalArgumentException("Only JSON types (values, Map, List) can be stringified. Unsupported type: "+arg.getClass().getName());
+    }
+
+
+    /**
+     * Validate input data types.
+     * This will make sure that all input data can be processed.
+     * 
+     * @param arg
+     * @return
+     */
+    public static void validateInput(Object arg) {
+        // if (arg == null)
+        //   return null;
+        
+        if (arg==null || arg == Jsonata.NULL_VALUE) {
+            return;
+        }
+        
+        if (arg instanceof JFunction) {
+            return;
+        }
+      
+        if (arg instanceof Symbol) {
+            return;
+        }
+
+        if (arg instanceof Double) {
+            return;
+        }
+
+        if (arg instanceof Number || arg instanceof Boolean) {
+            return;
+        }
+        
+        if (arg instanceof String) {
+            return;
+        }
+
+        if (arg instanceof Map) {
+            for (Entry<String, Object> e : ((Map<String, Object>) arg).entrySet()) {
+                validateInput(e.getKey());
+                validateInput(e.getValue());
+            }
+            return;
+        }
+
+        if ((arg instanceof List)) {
+            for (Object v : (List) arg) {
+                validateInput(v);
+            }
+            return;
+        }
+
+        // Throw error for unknown types
+        throw new IllegalArgumentException("Only JSON types (values, Map, List) are allowed as input. Unsupported type: "+
+            arg.getClass().getCanonicalName());
     }
 
     /**
@@ -469,12 +537,21 @@ public class Functions {
             return null;
         }
 
+        if (str.isEmpty()) {
+            return "";
+        }
+        
         // normalize whitespace
         var result = str.replaceAll("[ \t\n\r]+", " ");
         if (result.charAt(0) == ' ') {
             // strip leading space
             result = result.substring(1);
         }
+        
+        if (result.isEmpty()) {
+            return "";
+        }
+      
         if (result.charAt(result.length() - 1) == ' ') {
             // strip trailing space
             result = result.substring(0, result.length() - 1);
@@ -489,7 +566,7 @@ public class Functions {
      * @param {string} [char] - the pad character(s); defaults to ' '
      * @returns {string} - padded string
      */
-    public static String pad(String str, Integer width, String _char) {
+    public static String pad(String str, Number _width, String _char) {
         // undefined inputs always return undefined
         if (str == null) {
             return null;
@@ -500,6 +577,7 @@ public class Functions {
         }
 
         String result;
+        int width = _width.intValue();
 
         if (width < 0) {
             result = leftPad(str, -width, _char);
@@ -640,7 +718,7 @@ public class Functions {
      * @param {Integer} [limit] - max number of matches to return
      * @returns {Array} The array of match objects
      */
-    public static List<RegexpMatch> match(String str, Pattern regex, Integer limit) {
+    public static List<Map> match(String str, Pattern regex, Integer limit) {
         // undefined inputs always return undefined
         if (str == null) {
             return null;
@@ -1000,9 +1078,19 @@ public class Functions {
             return result;
 
         if (pattern instanceof String) {
-            result = Arrays.asList( str.split((String)pattern) );
+            String sep = (String)pattern;
+            if (sep.isEmpty()) {
+                // $split("str", ""): Split string into characters
+                int l = limit!=null ? limit.intValue() : Integer.MAX_VALUE;
+                for (int i=0; i<str.length() && i<l; i++) {
+                    result.add( ""+str.charAt(i) );
+                }
+            } else {
+                // Quote separator string + preserve trailing empty strings (-1)
+                result = Arrays.asList( str.split( Pattern.quote(sep), -1) );
+            }
         } else {
-            result = Arrays.asList( str.split(((Pattern)pattern).pattern() ) );
+            result = Arrays.asList( ((Pattern)pattern).split(str, -1) );
         }
         if (limit!=null && limit.intValue()<result.size()) {
             result = result.subList(0, limit.intValue());
@@ -1394,7 +1482,7 @@ public class Functions {
         if (arg instanceof List) {
             List l = (List)arg;
             if (l.size() == 1) {
-                result = toBoolean(l.get(0));
+                result = Boolean.TRUE.equals(toBoolean(l.get(0)));
             } else if (l.size() > 1) {
                 long truesLength = l.stream().filter(e -> Jsonata.boolize(e)).count();
                 result = truesLength > 0;
@@ -1525,7 +1613,8 @@ public class Functions {
             var func_args = hofFuncArgs(func, entry, i, arr);
             // invoke func
             var res = funcApply(func, func_args);
-            if (toBoolean(res)) {
+            var booledValue = toBoolean(res);
+            if (booledValue == null ? false : booledValue) {
                 result.add(entry);
             }
         }
@@ -1556,7 +1645,8 @@ public class Functions {
                 var func_args = hofFuncArgs(func, entry, i, arr);
                 // invoke func
                 var res = funcApply(func, func_args);
-                positiveResult = toBoolean(res);
+                var booledValue = toBoolean(res);
+                positiveResult = booledValue == null ? false : booledValue;
             }
             if (positiveResult) {
                 if(!hasFoundMatch) {
@@ -1764,6 +1854,10 @@ public class Functions {
      * @returns {Array} - the resultant array
      */
     public static List each(Map obj, Object func) throws Throwable {
+        if (obj==null) {
+            return null;
+        }
+
         var result = Utils.createSequence();
 
         for (var key : obj.keySet()) {
@@ -1797,7 +1891,7 @@ public class Functions {
      */
     public static void assertFn(boolean condition, String message) throws Throwable {
         if(!condition) {
-            throw new JException("D3141", -1, "$assert() statement failed");
+            throw new JException("D3141", -1, message!=null ? message : "$assert() statement failed");
 //                message: message || "$assert() statement failed"
         }
     }
@@ -1864,7 +1958,9 @@ public class Functions {
                 @Override
                 public int compare(Object o1, Object o2) {
                     try {
-                        boolean swap = (boolean) funcApply(comparator, Arrays.asList(o1, o2));
+                        Boolean swap = toBoolean(funcApply(comparator, Arrays.asList(o1, o2)));
+                        if (swap == null)
+                          return 0;
                         if (swap)
                           return 1;
                         else
@@ -1945,6 +2041,10 @@ public class Functions {
      * @returns {object} - sifted object
      */
     public static Object sift(Map<Object,Object> arg, Object func) throws Throwable {
+        if (arg==null) {
+            return null;
+        }
+
         var result = new LinkedHashMap<>();
 
         for (var item : arg.keySet()) {
@@ -1985,12 +2085,6 @@ public class Functions {
             return arg1;
         }
 
-        // New Java case: if both args are "string-like"
-        if ((arg1 instanceof Character || arg1 instanceof String) &&
-        (arg2 instanceof Character || arg2 instanceof String)) {
-            return ""+arg1+arg2;
-        }
-
         // if either argument is not an array, make it so
         if (!(arg1 instanceof List)) {
             arg1 = Utils.createSequence(arg1);
@@ -1998,19 +2092,13 @@ public class Functions {
         if (!(arg2 instanceof List)) {
             arg2 = new JList<>(Arrays.asList(arg2));
         }
-        // else
-        //     // Arg2 was a list: add it as a list element (don't flatten)
-        //     ((List)arg1).add((List)arg2);
 
         // Shortcut:
         if (((List)arg1).isEmpty() && (arg2 instanceof Utils.RangeList))
             return arg2;
 
         arg1 = new JList<>((List)arg1); // create a new copy!
-        if (arg2 instanceof JList && ((JList)arg2).cons)
-            ((List)arg1).add(arg2);
-        else
-            ((List)arg1).addAll((List)arg2);
+        ((List)arg1).addAll((List)arg2);
         return arg1;
     }
 
@@ -2054,7 +2142,7 @@ public class Functions {
     }
 
     public static Method getFunction(Class clz, String name) {
-        Method[] methods = Functions.class.getMethods();
+        Method[] methods = clz.getMethods();
         for (Method m : methods) {
             // if (m.getModifiers() == (Modifier.STATIC | Modifier.PUBLIC) ) {
             //     System.out.println(m.getName());
@@ -2148,8 +2236,15 @@ public class Functions {
             return OffsetDateTime.parse(timestamp).toInstant().toEpochMilli();
           }
           catch (RuntimeException e) {
-            LocalDate ldt = LocalDate.parse(timestamp, DateTimeFormatter.ofPattern("yyyy-MM-dd"));
-            return ldt.atStartOfDay().atZone(ZoneId.of("UTC")).toInstant().toEpochMilli();
+            try {
+              LocalDate ldt = LocalDate.parse(timestamp, DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+              return ldt.atStartOfDay().atZone(ZoneId.of("UTC")).toInstant().toEpochMilli();
+            }
+            catch (DateTimeParseException noZone) {
+              // Implementations usually default to the local time zone when the date string is non-standard
+              // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/parse#non-standard_date_strings
+              return LocalDateTime.parse(timestamp).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+            }
           }
         } else {
             return DateTimeUtils.parseDateTime(timestamp, picture);
@@ -2242,9 +2337,17 @@ public class Functions {
           }
         }
         
-        DecimalFormat formatter = picture != null ? new DecimalFormat(picture, new DecimalFormatSymbols(Locale.US)) : new DecimalFormat();
-        return formatter.parse(value);
-        //throw new RuntimeException("not implemented");
+        try {
+            DecimalFormat formatter = picture != null ? new DecimalFormat(picture, new DecimalFormatSymbols(Locale.US)) : new DecimalFormat();
+            return formatter.parse(value);
+        } catch (IllegalArgumentException ill) {
+            throw new ParseException("Formatting or parsing an integer as a sequence starting with \""+ picture +"\" is not supported by this implementation", 0);
+        } catch (Exception ex) {
+            // Ignore the exception, return null
+            // System.err.println("Exception in parseInteger (returning null): " + ex);
+            // ex.printStackTrace();
+            return null;
+        }
     }
 
     /**
@@ -2283,6 +2386,7 @@ public class Functions {
         }
 
         Jsonata ast;
+        Jsonata.Frame env = Jsonata.current.get().environment;
         try {
             ast = jsonata(expr);
         } catch(Throwable err) {
@@ -2293,7 +2397,7 @@ public class Functions {
         }
         Object result = null;
         try {
-            result = ast.evaluate(input, Jsonata.current.get().environment);
+            result = Jsonata.current.get().evaluate(ast.ast, input, env);
         } catch(Throwable err) {
             // error evaluating the expression passed to $eval
             //populateMessage(err);

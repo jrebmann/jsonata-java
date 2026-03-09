@@ -32,12 +32,12 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.Map.Entry;
 import java.util.concurrent.Callable;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -64,9 +64,9 @@ public class Jsonata {
     }
 
     public static class Frame {
-        Map<String, Object> bindings = new TreeMap<String,Object>();
+        final Map<String, Object> bindings = new LinkedHashMap<String,Object>();
 
-        Frame parent;
+        final Frame parent;
 
         public boolean isParallelCall;
 
@@ -77,6 +77,14 @@ public class Jsonata {
         public void bind(String name, Object val) {
             bindings.put(name, val);
         }
+
+        public void bind(String name, JFunction function) { 
+            bind(name, (Object)function);
+            if (function.signature != null)
+              function.signature.setFunctionName(name);
+        }
+        
+        public<R> void bind(String name, Fn0<R> lambda) { bind(name, (Object) lambda); }
         public<A,R> void bind(String name, Fn1<A,R> lambda) { bind(name, (Object)lambda); }
         public<A,B,R> void bind(String name, Fn2<A,B,R> lambda) { bind(name, (Object)lambda); }
 
@@ -119,11 +127,18 @@ public class Jsonata {
      * @returns {*} Evaluated input data
      */
     Object evaluate(Symbol expr, Object input, Frame environment) {
+        // Thread safety:
+        // Make sure each evaluate is executed on an instance per thread
+        return getPerThreadInstance()._evaluate(expr, input, environment);
+    }
+
+    Object _evaluate(Symbol expr, Object input, Frame environment) {
         Object result = null;
 
-        // Store the current input
+        // Store the current input + environment
         // This is required by Functions.functionEval for current $eval() input context
         this.input = input;
+        this.environment = environment;
 
         if (parser.dbg) System.out.println("eval expr="+expr+" type="+expr.type);//+" input="+input);
 
@@ -174,7 +189,7 @@ public class Jsonata {
                 result = evaluateRegex(expr); //, input, environment);
                 break;
             case "function":
-                result = /* await */ evaluateFunction(expr, input, environment, null);
+                result = /* await */ evaluateFunction(expr, input, environment, Utils.NONE);
                 break;
             case "variable":
                 result = evaluateVariable(expr, input, environment);
@@ -418,7 +433,7 @@ public class Jsonata {
         ((JList)result).tupleStream = true;
         var stepEnv = environment;
         if(tupleBindings == null) {
-            tupleBindings = (List<Map>) input.stream().filter(item -> item!=null).map(item -> Map.of("@", item)).collect(Collectors.toList());
+            tupleBindings = (List<Map>) input.stream().map(item -> Utils.mapOf("@", item)).collect(Collectors.toList());
         }
 
         for(var ee = 0; ee < tupleBindings.size(); ee++) {
@@ -486,7 +501,7 @@ public class Jsonata {
                 // count in from end of array
                 index = ((List)input).size() + index;
             }
-            var item = index<((List)input).size() ? ((List)input).get(index) : null;
+            var item = 0<=index && index<((List)input).size() ? ((List)input).get(index) : null;
             if(item != null) {
                 if(item instanceof List) {
                     results = (List)item;
@@ -709,9 +724,6 @@ public class Jsonata {
                 if((value instanceof List)) {
                     value = flatten(value, null);
                     results = (List)Functions.append(results, value);
-                } else if (value instanceof Map) {
-                // Call recursively do decompose the map
-                results.addAll((List)evaluateWildcard(expr, value));
                 } else {
                     results.add(value);
                 }
@@ -962,7 +974,8 @@ public class Jsonata {
         }
 
         for(var i = 0; i < ((List)rhs).size(); i++) {
-            if(((List)rhs).get(i).equals(lhs)) {
+            Object tmp = evaluateEqualityExpression(lhs, ((List)rhs).get(i), "=");
+            if (Boolean.TRUE.equals(tmp)) {
                 result = true;
                 break;
             }
@@ -1500,11 +1513,6 @@ public class Jsonata {
 
         var lhs = /* await */ evaluate(expr.lhs, input, environment);
 
-        // Map null to NULL_VALUE before applying to functions
-        // TODO: fix more generically!
-        if (lhs==null)
-            lhs = Jsonata.NULL_VALUE;
-
         if(expr.rhs.type.equals("function")) {
         //Symbol applyTo = new Symbol(); applyTo.context = lhs;
             // this is a Object _invocation_; invoke it with lhs expression as the first argument
@@ -1541,7 +1549,28 @@ public class Jsonata {
         return Utils.isFunction(o) || Functions.isLambda(o) || (o instanceof Pattern);
     }
      
-     static ThreadLocal<Jsonata> current = new ThreadLocal<>();
+    final static ThreadLocal<Jsonata> current = new ThreadLocal<>();
+
+    /**
+     * Returns a per thread instance of this parsed expression.
+     * 
+     * @return
+     */
+    Jsonata getPerThreadInstance() {
+        Jsonata threadInst = current.get();
+        // Fast path
+        if (threadInst!=null)
+            return threadInst;
+
+        synchronized(this) {
+            threadInst = current.get();
+            if (threadInst==null) {
+                threadInst = new Jsonata(this);
+                current.set(threadInst);
+            }
+            return threadInst;
+        }
+    }
 
      /**
       * Evaluate Object against input data
@@ -1553,7 +1582,7 @@ public class Jsonata {
      /* async */ Object evaluateFunction(Symbol expr, Object input, Frame environment, Object applytoContext) {
          Object result = null;
 
-         current.set(this);
+         // this.current is set by getPerThreadInstance() at this point
  
          // create the procedure
          // can"t assume that expr.procedure is a lambda type directly
@@ -1561,7 +1590,7 @@ public class Jsonata {
          // evaluate it generically first, then check that it is a function.  Throw error if not.
          var proc = /* await */ evaluate(expr.procedure, input, environment);
  
-         if (proc == null && (expr).procedure.type == "path" && environment.lookup((String)((Infix)expr).procedure.steps.get(0).value)!=null) {
+         if (proc == null && (expr).procedure.type == "path" && environment.lookup((String)expr.procedure.steps.get(0).value)!=null) {
              // help the user out here if they simply forgot the leading $
              throw new JException(
                  "T1005",
@@ -1573,7 +1602,7 @@ public class Jsonata {
  
         List<Object> evaluatedArgs = new ArrayList();
 
-         if (applytoContext != null) {
+         if (applytoContext != Utils.NONE) {
             evaluatedArgs.add(applytoContext);
          }
          // eager evaluation - evaluate the arguments
@@ -1714,23 +1743,29 @@ public class Jsonata {
                 //      result = /* await */ result;
                 //  }
              } else if (proc instanceof JLambda) {
-                System.err.println("Lambda "+proc);
+                // System.err.println("Lambda "+proc);
                 List _args = (List)validatedArgs;
-                if (proc instanceof Fn1) {
-                    result = ((Fn1)proc).apply(_args.get(0));
+                if (proc instanceof Fn0) {
+                    result = ((Fn0)proc).get();
+                } else if (proc instanceof Fn1) {
+                    result = ((Fn1)proc).apply(_args.size() <= 0 ? null : _args.get(0));
                 } else if (proc instanceof Fn2) {
-                    result = ((Fn2)proc).apply(_args.get(0), _args.get(1));
+                    result = ((Fn2)proc).apply(_args.size() <= 0 ? null : _args.get(0), _args.size() <= 1 ? null :_args.get(1));
                 }
              } else if (proc instanceof Pattern) {
                 List _res = new ArrayList<>();
-                for (String s : (List<String>)validatedArgs) {
+                for (Object s : (List)validatedArgs) {
                 //System.err.println("PAT "+proc+" input "+s);
-                    if (((Pattern)proc).matcher(s).find()) {
-                        //System.err.println("MATCH");
-                        _res.add(s);
+                    if (s instanceof String) {
+                        Matcher matcher = ((Pattern) proc).matcher((String) s);
+                        _res.add(regexClosure(matcher));
                     }
                 }
-                result = _res;
+                if (_res.size() == 1) {
+                    result = _res.get(0);
+                } else {
+                    result = _res;
+                }
              } else {
                 System.out.println("Proc not found "+proc);
                  throw new JException(
@@ -1749,6 +1784,21 @@ public class Jsonata {
          }
          return result;
      }
+
+    private static Map regexClosure(Matcher matcher) {
+        if (matcher.find()) {
+            String group = matcher.group();
+            return Map.of(
+                    "match", group,
+                    "start", matcher.start(),
+                    "end", matcher.end(),
+                    "groups", List.of(group),
+                    "next", (Fn0<Map>) () -> regexClosure(matcher)
+            );
+        } else {
+            return null;
+        }
+    }
  
      /**
       * Evaluate lambda against input data
@@ -2158,7 +2208,8 @@ public class Jsonata {
         public JFunction(JFunctionCallable function, String signature) {
             this.function = function;
             if (signature!=null)
-                this.signature = new Signature(signature, "ext2b");//function.getClass().getName());
+                // use classname as default, gets overwritten once the function is registered
+                this.signature = new Signature(signature, function.getClass().getName());
         }
 
         public JFunction(String functionName, String signature, Class clz, Object instance, String implMethodName) {
@@ -2200,7 +2251,7 @@ public class Jsonata {
         }
 
         public int getNumberOfArgs() {
-            return method.getParameterTypes().length;
+            return method != null ? method.getParameterTypes().length : 0;
         }
     }
 
@@ -2473,13 +2524,48 @@ public class Jsonata {
         //  } else {
         //      jsonata.RegexEngine = RegExp;
         //  }
+
+        // Set instance for this thread
+        current.set(this);
+    }
+
+    /**
+     * Creates a clone of the given Jsonata instance.
+     * Package-private copy constructor used to create per thread instances.
+     * 
+     * @param other
+     */
+    Jsonata(Jsonata other) {
+        this.ast = other.ast;
+        this.environment = other.environment;
+        this.timestamp = other.timestamp;
+    }
+
+    /**
+     * Flag: validate input objects to comply with JSON types
+     */
+    boolean validateInput = true;
+
+    /**
+     * Checks whether input validation is active
+     */
+    public boolean isValidateInput() {
+        return validateInput;
+    }
+
+    /**
+     * Enable or disable input validation
+     * @param validateInput
+     */
+    public void setValidateInput(boolean validateInput) {
+        this.validateInput = validateInput;
     }
 
     public Object evaluate(Object input) { return evaluate(input,null); }
 
     /* async */
     public Object evaluate(Object input, Frame bindings) { // FIXME:, callback) {
-        // throw if the expression compiled with syntax errors
+                // throw if the expression compiled with syntax errors
         if(errors != null) {
             throw new JException("S0500", 0);
         }
@@ -2500,7 +2586,7 @@ public class Jsonata {
 
         // capture the timestamp and put it in the execution environment
         // the $now() and $millis() functions will return this value - whenever it is called
-        //timestamp = new Date();
+        timestamp = System.currentTimeMillis();
         //exec_env.timestamp = timestamp;
 
         // if the input is a JSON array, then wrap it in a singleton sequence so it gets treated as a single input
@@ -2508,6 +2594,9 @@ public class Jsonata {
             input = Utils.createSequence(input);
             ((JList)input).outerWrapper = true;
         }
+
+        if (validateInput)
+            Functions.validateInput(input);
 
         Object it;
         try {
@@ -2523,7 +2612,7 @@ public class Jsonata {
             throw err;
         }
     }
-    
+
     public void assign(String name, Object value) {
         environment.bind(name, value);
     }
@@ -2532,17 +2621,29 @@ public class Jsonata {
         environment.bind(name, implementation);
     }
 
+    public<R> void registerFunction(String name, Fn0<R> implementation) {
+      environment.bind(name, implementation);
+  }
+
+    public<A,R> void registerFunction(String name, Fn1<A,R> implementation) {
+      environment.bind(name, implementation);
+  }
+
+    public<A,B,R> void registerFunction(String name, Fn2<A,B,R> implementation) {
+      environment.bind(name, implementation);
+  }
+
     public List<Exception> getErrors() {
         return errors;
     }
 
-    static ThreadLocal<Parser> _parser = new ThreadLocal<>();
-    static synchronized Parser getParser() {
+    final static ThreadLocal<Parser> _parser = new ThreadLocal<>();
+    final static synchronized Parser getParser() {
         Parser p = _parser.get();
         if (p!=null)
             return p;
         _parser.set(p = new Parser());
         return p;
     }
-    Parser parser = getParser();
+    final Parser parser = getParser();
 }

@@ -61,6 +61,8 @@ static HashMap<String, Integer> operators = new HashMap<String, Integer>() {{
     put("<=", 40);
     put(">=", 40);
     put("~>", 40);
+    put("?:", 40);
+    put("??", 40);
     put("and", 30);
     put("or", 25);
     put("in", 40);
@@ -137,12 +139,20 @@ static HashMap<String, String> escapes = new HashMap<String, String>() {{
                     throw new JException("S0301", position);
                 }
                 position++;
-                currentChar = path.charAt(position);
+                if (position < length) {
+                    currentChar = path.charAt(position);
+                } else {
+                    currentChar = 0;
+                }
                 // flags
                 start = position;
                 while (currentChar == 'i' || currentChar == 'm') {
                     position++;
-                    currentChar = path.charAt(position);
+                    if (position < length) {
+                        currentChar = path.charAt(position);
+                    } else {
+                        currentChar = 0;
+                    }
                 }
                 flags = path.substring(start, position) + 'g';
                 
@@ -232,6 +242,16 @@ static HashMap<String, String> escapes = new HashMap<String, String>() {{
             position += 2;
             return create("operator", "~>");
         }
+        if (currentChar == '?' && haveMore && path.charAt(position + 1) == ':') {
+            // ?: default / elvis operator
+            position += 2;
+            return create("operator", "?:");
+        }
+        if (currentChar == '?' && haveMore && path.charAt(position + 1) == '?') {
+            // ?? coalescing operator
+            position += 2;
+            return create("operator", "??");
+        }
         // test for single char operators
         if (operators.get(""+currentChar)!=null) {
             position++;
@@ -247,12 +267,12 @@ static HashMap<String, String> escapes = new HashMap<String, String>() {{
                 currentChar = path.charAt(position);
                 if (currentChar == '\\') { // escape sequence
                     position++;
-                    currentChar = path.charAt(position);
+                    if (position < path.length()) currentChar = path.charAt(position); else throw new JException("S0103", position, "");
                     if (escapes.get(""+currentChar)!=null) {
                         qstr += escapes.get(""+currentChar);
                     } else if (currentChar == 'u') {
                         //  u should be followed by 4 hex digits
-                        String octets = path.substring(position + 1, (position + 1) + 4);
+                        String octets = position+5 < path.length() ? path.substring(position + 1, (position + 1) + 4) : "";
                         if (octets.matches("^[0-9a-fA-F]+$")) { //  /^[0-9a-fA-F]+$/.test(octets)) {
                             int codepoint = Integer.parseInt(octets, 16);
                             qstr += Character.toString((char) codepoint);
@@ -262,7 +282,7 @@ static HashMap<String, String> escapes = new HashMap<String, String>() {{
                         }
                     } else {
                         // illegal escape sequence
-                        throw new JException("S0301", position, currentChar);
+                        throw new JException("S0103", position, currentChar);
 
                     }
                 } else if (currentChar == quoteType) {

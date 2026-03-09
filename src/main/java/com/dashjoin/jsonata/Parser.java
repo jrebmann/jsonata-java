@@ -92,7 +92,7 @@ public class Parser {
         }
     }
     
-    class Symbol implements Cloneable {
+    public class Symbol implements Cloneable {
 
         //Symbol s;
         String id;
@@ -274,8 +274,8 @@ public class Parser {
                 JException err = new JException(
                     code,
                     node.position,
-                    node.value,
-                    id
+                    id,
+                    node.value
                 );
                 return handleError(err);
             }
@@ -493,6 +493,26 @@ public class Parser {
         // merged Infix: register(new Prefix("-")); // unary numeric negation
         register(new Infix("~>")); // function application
 
+        // coalescing operator
+        register(new Infix("??", Tokenizer.operators.get("??")) {
+
+            @Override Symbol led(Symbol left) {
+                this.type = "condition";
+                Symbol c = new Symbol();
+                this.condition = c;
+                {
+                    c.type = "function";
+                    c.value = "(";
+                    Symbol p = new Symbol();
+                    c.procedure = p; p.type = "variable"; p.value = "exists";
+                    c.arguments = List.of(left);
+                }
+                this.then = left;
+                this._else = expression(0);
+                return this;
+            }
+        });
+
         register(new InfixR("(error)", 10) {
             @Override
             Symbol led(Symbol left) {
@@ -537,7 +557,7 @@ public class Parser {
             this.arguments = new ArrayList<>();
             if (!node.id.equals(")")) {
                 for (; ;) {
-                    if (node.type.equals("operator") && node.id.equals("?")) {
+                    if ("operator".equals(node.type) && node.id.equals("?")) {
                         // partial function application
                         this.type = "partial";
                         this.arguments.add(node);
@@ -787,6 +807,18 @@ public class Parser {
             }
         });
 
+        // elvis/default operator
+        register(new Infix("?:", Tokenizer.operators.get("?:")) {
+
+            @Override Symbol led(Symbol left) {
+                this.type = "condition";
+                this.condition = left;
+                this.then = left;
+                this._else = expression(0);
+                return this;
+            }
+        });
+
         // object transformer
         register(new Prefix("|") {
 
@@ -966,7 +998,8 @@ public class Parser {
                             rest.procedure.type.equals("path") &&
                             rest.procedure.steps.size() == 1 &&
                             rest.procedure.steps.get(0).type.equals("name") &&
-                            result.steps.get(result.steps.size() - 1).type.equals("function")) {
+                            result.steps.get(result.steps.size() - 1).type.equals("function") &&
+                            rest.procedure.steps.get(0).value instanceof Symbol) {
                             // next function in chain of functions - will override a thenable
                             result.steps.get(result.steps.size() - 1).nextFunction = (Symbol)rest.procedure.steps.get(0).value;
                         }
@@ -1176,6 +1209,7 @@ public class Parser {
                         result = new Symbol(); result.type = "apply"; result.value = expr.value; result.position = expr.position;
                         result.lhs = processAST(expr.lhs);
                         result.rhs = processAST(expr.rhs);
+                        result.keepArray = result.lhs.keepArray || result.rhs.keepArray;
                         break;                    
                     default:
                         Infix _result = new Infix(null);

@@ -88,6 +88,10 @@ public class Signature implements Serializable {
         this.functionName = function;
         parseSignature(signature);
     }
+    
+    public void setFunctionName(String functionName) {
+        this.functionName = functionName;
+    }
 
     public static void main(String[] args) {
         Signature s = new Signature("<s-:s>", "test");//<s-(sf)(sf)n?:s>");
@@ -341,7 +345,7 @@ public class Signature implements Serializable {
                                 // missing (undefined)
                                 arg = null;
                             } else {
-                                arg = args.get(argIndex);
+                                arg = argIndex <args.size() ? args.get(argIndex) : null;
                                 var arrayOK = true;
                                 // is there type information on the contents of the array?
                                 if (param.subtype != null) {
@@ -381,11 +385,13 @@ public class Signature implements Serializable {
                             validatedArgs.add(arg);
                             argIndex++;
                         } else {
+                            arg = argIndex<args.size() ? args.get(argIndex) : null;
                             validatedArgs.add(arg);
                             argIndex++;
                         }
                     }
                 }
+                index++;
             }
             return validatedArgs;
         }   

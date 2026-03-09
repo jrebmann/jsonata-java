@@ -14,7 +14,7 @@ This is a 1:1 Java port of the [JSONata reference implementation](https://github
 * [JSON parser agnostic](https://github.com/dashjoin/jsonata-java/blob/main/samples/json-interop.md)
     - use with Jackson, GSon, ...
     - comes with integrated vanilla parser
-* Performance optimized
+* Performance optimized & thread safe
     - [Native jsonata command line tool](https://github.com/dashjoin/jsonata-cli)
 * Enterprise support
     - [Premium support available from the original developers](https://dashjoin.com)
@@ -26,7 +26,7 @@ Add the dependency in pom.xml:
 <dependency>
     <groupId>com.dashjoin</groupId>
     <artifactId>jsonata</artifactId>
-    <version>0.9.2</version>
+    <version>0.9.9</version>
 </dependency>
 ```
 Here is the [release change log](changelog.md)
@@ -56,6 +56,9 @@ public class Main {
 
 ### Custom Functions
 
+You can define custom functions and declare variables via a JSONata frame or 
+the registerFunction method:
+
 ```Java
         var expression = jsonata("$sum(example.value) + $sin($PI/2)");
 
@@ -66,6 +69,25 @@ public class Main {
 
         var result = expression.evaluate(data, env);  // returns 25
 ```
+
+For more examples, please refer to this [test case](https://github.com/dashjoin/jsonata-java/blob/main/src/test/java/com/dashjoin/jsonata/CustomFunctionTest.java).
+
+### Execution Scope
+
+`Jsonata.Frame` represents the execution scope or environment for a JSONata expression. It serves two primary purposes:
+
+1. Variable Bindings: It holds the symbol table for an expression, mapping variable names (like $name) to their corresponding Java objects.
+2. Execution Control: It allows you to set resource constraints on the evaluation to prevent expressions from running for too long or consuming too many resources, which is crucial for security and stability.
+
+When you call `jsonata.evaluate(data, frame)`, the evaluation runs within the context of that frame.
+
+You can set an execution timeout and a maximum recursion depth using the `setRuntimeBounds(long timeout, int maxRecursionDepth)` method on a Frame instance.
+
+* timeout: The maximum time in milliseconds that the evaluation is allowed to run. If it exceeds this time, a JException is thrown.
+* maxRecursionDepth: The maximum depth of the function call stack. This prevents infinite recursion (e.g., from a recursive function definition in the expression) and protects against StackOverflowError. If the depth is exceeded, a JException is thrown.
+
+See [RuntimeTest.java](https://github.com/dashjoin/jsonata-java/blob/main/src/test/java/com/dashjoin/jsonata/RuntimeTest.java) for details
+and an example of how to provide custom callbacks.
 
 ## History
 We needed a high performance and 100% compatible engine for the ETL and data transformations of the [Dashjoin Low Code platform](https://github.com/dashjoin/platform). Being a JSON full stack based on Quarkus/Java, JSONata was a very good fit and is even more today.
@@ -86,12 +108,14 @@ We lose the type safety and compile time checks Java generics introduced, but si
 
 ### No JSON wrapper library
 To get as near as possible to the Javascript syntax, decision was made to use
-* Java java.util.Map as Javascript object
+* java.util.Map as Javascript object
     - which in turn represents a JSON object
-* Java java.util.List as Javascript array
+* java.util.List as Javascript array
     - which in turn represents JSON lists/JSONata sequences
+* String, numbers, and boolean can be used as well
+* [This test case](https://github.com/dashjoin/jsonata-java/blob/main/src/test/java/com/dashjoin/jsonata/TypesTest.java) documents which types are legal and how you can use a JSON library like Jackson to convert Pojos and other types
 
-So no JSON lib like Jackson is being used. This has advantages, but needs careful design w.r.t. how the logic is being ported.
+No JSON lib like Jackson is being used. This has advantages, but needs careful design w.r.t. how the logic is being ported.
 ### The big 'null vs undefined' question
 Porting Javascript code gets ambiguous as soon as there is a boolean expression that might depend on null and/or undefined.
 In Java there are basically these solutions:
@@ -101,6 +125,13 @@ In Java there are basically these solutions:
 
 JSON libs will usually use a Holder variant (implemented in some JSONValue implementation).
 After review, it turned out that we can stay as near as possible to the original code structure (with as little special code as possible) by using the 3rd variant.
+
+### Numeric Values
+
+Compared to Java, Javascript handles numbers quite differently.
+Whenever a computation is done, the engine tries to "fit" the result into an int, long, or double (see com.dashjoin.jsonata.Utils.convertNumber(Number)).
+This [test case](https://github.com/dashjoin/jsonata-java/blob/main/src/test/java/com/dashjoin/jsonata/NumberTest.java)
+shows this behavior.
 
 ## Performance
 We conducted some experiments to measure performance, but it's not an 'overall benchmark' yet. Your mileage may vary...
